@@ -1,6 +1,6 @@
 ---
 name: stock_db
-description: Read stock report pages from Notion (Claude Contens/stock_reports/YYYYMMDD/YYYYMMDD_{企業名}) via Notion MCP, extract the 終値/前日比/前日終値/急騰日 table, and append a row to the Notion database Claude Contens/株価DB (or to Claude Contens/参照DB when the same 銘柄 already exists in 株価DB). Trigger when user runs /stock_db <YYYYMMDD or 企業名>, or says "株価DBに追記して", "株価DBに登録して", "DBに追加して".
+description: Read stock report pages from Notion (Claude Contens/stock_reports/YYYYMMDD/YYYYMMDD_{企業名}) via Notion MCP, extract the 終値/前日比/前日終値/急騰日 table and the キーワード一覧, and append a row to the Notion database Claude Contens/株価DB (or to Claude Contens/参照DB when the same 銘柄 already exists in 株価DB). Trigger when user runs /stock_db <YYYYMMDD or 企業名>, or says "株価DBに追記して", "株価DBに登録して", "DBに追加して".
 ---
 
 # stock_db
@@ -48,12 +48,13 @@ Notion の `Claude Contens/stock_reports/YYYYMMDD/YYYYMMDD_{企業名}` ペー�
 
 | プロパティ | 型 | 書式 | 書き込む値の例 |
 |---|---|---|---|
-| `銘柄` | title | - | `THE_WHY_HOW_DO_COMPANY` |
+| `銘柄` | title | レポートページへのリンク | `[ZenmuTech](https://app.notion.com/p/3ec2e8c9228c812dbb5edbb4830e84e2)` |
 | `終値（推定）` | number | 円 | `170` |
 | `前日比` | number | 円 | `37`（下落時は `-37`） |
 | `前日比率` | number | % | `0.2794`（**小数で保存**。27.94% → 0.2794） |
 | `前日終値（推定）` | number | 円 | `133` |
 | `急騰日` | date | YYYY/MM/DD | `date:急騰日:start` = `2026-09-25`, `date:急騰日:is_datetime` = `0` |
+| `キーワード` | text | `, `（カンマ＋半角スペース）区切り | `秘密分散技術, 秘密計算, サイバーセキュリティ` |
 | `参照回数` | number | - | 株価DB のみ。新規追加時は空。同じ銘柄を参照DB に追記するたびに +1 |
 
 ## 手順
@@ -93,6 +94,18 @@ Notion の `Claude Contens/stock_reports/YYYYMMDD/YYYYMMDD_{企業名}` ペー�
 
    - **テーブルが無い、または `終値`・`前日比`・`前日終値` のいずれかが欠けている場合は、そのページをスキップ**し、理由を記録する（推測で値を埋めない）
    - `急騰日` 行が無い場合は `取得日時` 行の日付を使い、それも無ければページタイトルの `YYYYMMDD` を使う（どれを使ったかを完了報告に含める）
+   - `## 主要事業 × 業界キーワード` → `### キーワード一覧` の直下の行から、バッククォートで囲まれた語を順番どおりに全て取り出す
+
+     ```md
+     ### キーワード一覧
+     `秘密分散技術` `秘密計算` `サイバーセキュリティ` `ゼロトラスト`
+     ```
+
+     → `["秘密分散技術", "秘密計算", "サイバーセキュリティ", "ゼロトラスト"]`
+
+     - バッククォートが無い場合は `、` / `,` / `・` / 改行 / 箇条書き記号で区切って取り出す
+     - 重複は除き、前後の空白は取り除く
+     - `キーワード一覧` が無い場合は `キーワード` を空にして追記する（スキップはしない）。完了報告に「キーワードなし」と含める
 
 3. 値を数値に変換する
 
@@ -106,7 +119,20 @@ Notion の `Claude Contens/stock_reports/YYYYMMDD/YYYYMMDD_{企業名}` ペー�
 
    - 前日比率が表に無い場合は `前日比 / 前日終値` を小数第 4 位で丸めて算出する
    - 数値に変換できない値（`-`、`未公開` など）があればそのページはスキップする
-   - `銘柄` にはページタイトルから `YYYYMMDD_` を除いた企業名を入れる
+   - `銘柄` はページタイトルから `YYYYMMDD_` を除いた企業名を、レポートページへの Markdown リンクにして入れる
+
+     ```text
+     [{企業名}]({レポートページの URL})
+     例: [ZenmuTech](https://app.notion.com/p/3ec2e8c9228c812dbb5edbb4830e84e2)
+     ```
+
+     - URL は手順 2 で `notion-fetch` したページの URL（`?pvs=...` などのクエリは除く）
+     - リンクテキストは企業名のみ（`YYYYMMDD_` やアイコン絵文字は含めない）
+   - `キーワード` は手順 2 で取り出した語を `, `（カンマ＋半角スペース）で連結した文字列にする
+
+     | 元 | 結果 |
+     |---|---|
+     | `` `秘密分散技術` `秘密計算` `サイバーセキュリティ` `` | `秘密分散技術, 秘密計算, サイバーセキュリティ` |
 
 4. 株価DB に同じ銘柄があるかで追記先を振り分ける
 
@@ -121,6 +147,8 @@ Notion の `Claude Contens/stock_reports/YYYYMMDD/YYYYMMDD_{企業名}` ペー�
      WHERE "銘柄" = ?
      ORDER BY "date:急騰日:start" ASC
      ```
+
+     - SQL モードでは `銘柄` はリンクを除いたプレーンテキスト（企業名のみ）として比較されるため、パラメータには `[...](...)` ではなく企業名だけを渡す
 
    - 4b. 判定結果に応じて追記先を決める
 
@@ -170,12 +198,13 @@ Notion の `Claude Contens/stock_reports/YYYYMMDD/YYYYMMDD_{企業名}` ペー�
        "pages": [
          {
            "properties": {
-             "銘柄": "THE_WHY_HOW_DO_COMPANY",
-             "終値（推定）": 170,
-             "前日比": 37,
-             "前日比率": 0.2794,
-             "前日終値（推定）": 133,
-             "date:急騰日:start": "2026-09-25",
+             "銘柄": "[ZenmuTech](https://app.notion.com/p/3ec2e8c9228c812dbb5edbb4830e84e2)",
+             "終値（推定）": 4010,
+             "前日比": 700,
+             "前日比率": 0.2115,
+             "前日終値（推定）": 3310,
+             "キーワード": "秘密分散技術, 秘密計算, サイバーセキュリティ, ゼロトラスト, データ保護, 医療AI, エッジコンピューティング",
+             "date:急騰日:start": "2026-10-01",
              "date:急騰日:is_datetime": 0
            }
          }
@@ -187,7 +216,7 @@ Notion の `Claude Contens/stock_reports/YYYYMMDD/YYYYMMDD_{企業名}` ペー�
      - 参照DB: `3e12b459-2387-40f7-bc20-0353e38958c6`
 
    ```js
-   rows.forEach(r => console.log(`  [${r.dest}] ${r.銘柄} 終値¥${r.終値} 前日比${r.前日比}(${r.前日比率}) 急騰日${r.急騰日}`))
+   rows.forEach(r => console.log(`  [${r.dest}] ${r.銘柄} 終値¥${r.終値} 前日比${r.前日比}(${r.前日比率}) 急騰日${r.急騰日} キーワード${r.キーワード ? r.キーワード.split(", ").length + "件" : "なし"}`))
    ```
 
 5. 結果をユーザーに通知する
@@ -201,5 +230,7 @@ Notion の `Claude Contens/stock_reports/YYYYMMDD/YYYYMMDD_{企業名}` ペー�
 
 - Notion MCP の接続と OAuth 認証が必要。未認証の場合は `/mcp` → `notion` → `Authenticate` で認証してから再実行する
 - `前日比率` は Notion 側がパーセント表示のため、必ず小数（27.94% → `0.2794`）で書き込む。`27.94` を入れると 2794% と表示される
+- `銘柄` は必ず `[企業名](レポートページURL)` のリンク形式で書き込む。プレーンテキストだけで書くとレポートページに飛べなくなる
+- `キーワード` はレポートの `キーワード一覧` を `, ` 区切りで書き込む（参照DB に追記する場合も同様）
 - `参照回数` は株価DB に同じ銘柄が既にあり、参照DB へ追記するときだけ +1 する（新規追加時は空のまま）
 - レポートページが無い場合は、先に `stock_searching` → `notion_save` スキルを実行するようユーザーに案内する
